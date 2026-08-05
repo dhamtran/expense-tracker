@@ -34,7 +34,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def load_ledger():
     try:
         # Pull live data from your Google Sheet
-        df = conn.read(worksheet="Sheet1", usecols=list(range(12)))
+        df = conn.read(worksheet=0, usecols=list(range(12)))
         return df.dropna(how="all")
     except Exception:
         return pd.DataFrame(columns=[
@@ -104,7 +104,7 @@ with tab1:
                 if new_rows:
                     new_data_df = pd.DataFrame(new_rows)
                     updated_df = pd.concat([ledger_df, new_data_df], ignore_index=True)
-                    conn.update(worksheet="Sheet1", data=updated_df)
+                    conn.update(worksheet=0, data=updated_df)
                     st.success("✅ Successfully synced to your master Google Sheet!")
                     st.cache_data.clear()
                     st.rerun()
