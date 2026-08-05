@@ -2,3 +2,4 @@ streamlit
 pandas
 google-genai
 st-gsheets-connection
+starlette<0.38.0
