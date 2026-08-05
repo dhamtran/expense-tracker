@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 st.title("🧾 IRAS-Compliant Expense Parser")
-st.caption("Custom Expensify replacement powered by Gemini 2.5")
+st.caption("Custom Expensify replacement powered by MOWIN")
 
 # Sidebar - API Key Management
 with st.sidebar:
