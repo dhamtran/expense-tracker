@@ -5,12 +5,11 @@ from google import genai
 from google.genai import types
 from streamlit_gsheets import GSheetsConnection
 
-# 1. UI Configuration (Expensify Style)
+# 1. UI Configuration
 st.set_page_config(page_title="MOWIN Expenses", page_icon="🟢", layout="wide")
 
 st.markdown("""
 <style>
-    /* Expensify Clean Theme */
     div.stButton > button:first-child {
         background-color: #004D40; color: white; border-radius: 8px;
         padding: 10px 24px; border: none; font-weight: bold; width: 100%;
@@ -31,13 +30,12 @@ st.title("🟢 MOWIN Expenses")
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
-# 2. Permanent Cloud Storage Connection (Google Sheets)
+# 2. Permanent Cloud Storage Connection
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-@st.cache_data(ttl=5) # Refreshes every 5 seconds
+@st.cache_data(ttl=5) 
 def load_ledger():
     try:
-        # Pull live data from the first tab (index 0) of your Google Sheet
         df = conn.read(worksheet=0, usecols=list(range(12)))
         return df.dropna(how="all")
     except Exception:
@@ -106,6 +104,8 @@ with tab1:
                 client = genai.Client(api_key=api_key)
                 
                 new_rows = []
+                duplicates_found = 0
+                
                 for file in uploaded_files:
                     with st.spinner(f"Scanning {file.name}..."):
                         prompt = """
@@ -120,7 +120,7 @@ with tab1:
                         7. GST Rate: Must be "9%", "0%", or "Exempt"
                         8. GST Amt (SGD): If GST Rate is "9%", calculate (Amount SGD / 1.09) * 0.09. If 0% or Exempt, return 0.00
                         9. Category: STRICTLY ONE of ['Travel & Transport', 'Accommodation', 'Meals & Entertainment', 'Office & Supplies', 'Communication', 'Professional Fees', 'Marketing & Business Dev', 'Utilities & Premises', 'Staff & Welfare', 'Bank & Finance', 'Other Business Costs', 'Personal / Non-Deductible']
-                        10. Payment Method: Cash, Card, PayNow, etc.
+                        10. Payment Method: Cash, Card, PayNow, Bank Transfer, etc.
                         11. Purpose/Notes: Brief business purpose
                         12. Status: "Unreviewed"
                         """
@@ -148,7 +148,7 @@ with tab1:
                         # Run Duplicate Check
                         if is_duplicate_record(extracted_data, ledger_df, new_rows):
                             extracted_data["Status"] = "Potential Duplicate"
-                            st.warning(f"⚠️ Potential duplicate detected for {extracted_data.get('Merchant', 'receipt')} ({extracted_data.get('Date')})")
+                            duplicates_found += 1
                         
                         new_rows.append(extracted_data)
                 
@@ -157,7 +157,11 @@ with tab1:
                     new_data_df = pd.DataFrame(new_rows)
                     updated_df = pd.concat([ledger_df, new_data_df], ignore_index=True)
                     conn.update(worksheet=0, data=updated_df)
-                    st.success("✅ Successfully synced to your master Google Sheet!")
+                    
+                    if duplicates_found > 0:
+                        st.toast(f"⚠️ Saved! {duplicates_found} potential duplicate(s) flagged.", icon="⚠️")
+                    else:
+                        st.toast("✅ Successfully synced to your master Google Sheet!", icon="✅")
                     
                     # Reset Uploader State and Refresh
                     st.session_state.uploader_key += 1
