@@ -36,7 +36,8 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 @st.cache_data(ttl=5) 
 def load_ledger():
     try:
-        df = conn.read(worksheet=0, usecols=list(range(12)))
+        # Added ttl=5 here to force the Google Sheets connection to refresh
+        df = conn.read(worksheet=0, usecols=list(range(12)), ttl=5)
         return df.dropna(how="all")
     except Exception:
         return pd.DataFrame(columns=[
@@ -174,6 +175,13 @@ with tab1:
                 st.error(f"Error processing: {e}")
 
 with tab2:
+    # Refresh Button Row
+    col_empty, col_btn = st.columns([4, 1])
+    with col_btn:
+        if st.button("🔄 Refresh Data", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
     # Top Dashboard Metrics
     col1, col2, col3 = st.columns(3)
     total_sgd = ledger_df["Amount (SGD)"].sum() if not ledger_df.empty else 0.0
