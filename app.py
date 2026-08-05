@@ -27,13 +27,17 @@ st.markdown("""
 
 st.title("🟢 MOWIN Expenses")
 
+# Initialize File Uploader Session Key
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
 # 2. Permanent Cloud Storage Connection (Google Sheets)
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=5) # Refreshes every 5 seconds
 def load_ledger():
     try:
-        # Pull live data from your Google Sheet
+        # Pull live data from the first tab (index 0) of your Google Sheet
         df = conn.read(worksheet=0, usecols=list(range(12)))
         return df.dropna(how="all")
     except Exception:
@@ -45,19 +49,59 @@ def load_ledger():
 
 ledger_df = load_ledger()
 
+# Helper Function: Duplicate Checking
+def is_duplicate_record(new_item, existing_df, current_batch):
+    new_date = str(new_item.get("Date", "")).strip()
+    new_merchant = str(new_item.get("Merchant", "")).strip().lower()
+    try:
+        new_amount = float(new_item.get("Original Amount", 0))
+    except (ValueError, TypeError):
+        new_amount = 0.0
+
+    # 1. Check against existing Google Sheet records
+    if not existing_df.empty:
+        for _, row in existing_df.iterrows():
+            row_date = str(row.get("Date", "")).strip()
+            row_merchant = str(row.get("Merchant", "")).strip().lower()
+            try:
+                row_amount = float(row.get("Original Amount", 0))
+            except (ValueError, TypeError):
+                row_amount = 0.0
+            
+            if new_date == row_date and new_merchant == row_merchant and abs(new_amount - row_amount) < 0.01:
+                return True
+
+    # 2. Check against items already processed in current upload batch
+    for item in current_batch:
+        b_date = str(item.get("Date", "")).strip()
+        b_merchant = str(item.get("Merchant", "")).strip().lower()
+        try:
+            b_amount = float(item.get("Original Amount", 0))
+        except (ValueError, TypeError):
+            b_amount = 0.0
+        
+        if new_date == b_date and new_merchant == b_merchant and abs(new_amount - b_amount) < 0.01:
+            return True
+
+    return False
+
 # 3. Intuitive Tabbed Interface
 tab1, tab2 = st.tabs(["📷 SmartScan", "📊 Cloud Ledger"])
 
 with tab1:
     st.subheader("Upload Receipts")
-    uploaded_files = st.file_uploader("Drag & drop images or PDFs here", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Drag & drop images or PDFs here", 
+        type=["pdf", "png", "jpg", "jpeg"], 
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key}"
+    )
     
     if st.button("Process & Save to Cloud"):
         if not uploaded_files:
             st.warning("Please upload a receipt first.")
         else:
             try:
-                # Automatically pulls your saved API Key from the cloud
                 api_key = st.secrets["GEMINI_API_KEY"]
                 client = genai.Client(api_key=api_key)
                 
@@ -98,7 +142,15 @@ with tab1:
                             contents=[types.Part.from_bytes(data=file.read(), mime_type=file.type), prompt],
                             config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=response_schema, temperature=0.1)
                         )
-                        new_rows.append(json.loads(response.text))
+                        
+                        extracted_data = json.loads(response.text)
+                        
+                        # Run Duplicate Check
+                        if is_duplicate_record(extracted_data, ledger_df, new_rows):
+                            extracted_data["Status"] = "Potential Duplicate"
+                            st.warning(f"⚠️ Potential duplicate detected for {extracted_data.get('Merchant', 'receipt')} ({extracted_data.get('Date')})")
+                        
+                        new_rows.append(extracted_data)
                 
                 # Append to Google Sheet permanently
                 if new_rows:
@@ -106,10 +158,13 @@ with tab1:
                     updated_df = pd.concat([ledger_df, new_data_df], ignore_index=True)
                     conn.update(worksheet=0, data=updated_df)
                     st.success("✅ Successfully synced to your master Google Sheet!")
+                    
+                    # Reset Uploader State and Refresh
+                    st.session_state.uploader_key += 1
                     st.cache_data.clear()
                     st.rerun()
 
-            except KeyError as e:
+            except KeyError:
                 st.error("🚨 Missing Cloud Secret. Please configure your App Secrets in the Streamlit Dashboard.")
             except Exception as e:
                 st.error(f"Error processing: {e}")
