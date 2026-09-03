@@ -46,7 +46,14 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def load_ledger():
     try:
         df = conn.read(worksheet=0, usecols=list(range(13)), ttl=5)
-        return df.dropna(how="all")
+        df = df.dropna(how="all")
+        
+        # Ensure "Receipt Link" exists and is formatted as text
+        if "Receipt Link" not in df.columns:
+            df["Receipt Link"] = ""
+        df["Receipt Link"] = df["Receipt Link"].fillna("").astype(str)
+        
+        return df
     except Exception:
         return pd.DataFrame(columns=[
             "Date", "Merchant", "Original Currency", "Original Amount", 
