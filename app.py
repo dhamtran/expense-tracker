@@ -285,6 +285,9 @@ with tab2:
     if ledger_df.empty:
         st.info("No records found in your Google Sheet yet.")
     else:
+        # Sanitize Receipt Link column to prevent Streamlit type-check errors
+        ledger_df["Receipt Link"] = ledger_df["Receipt Link"].fillna("").astype(str)
+        
         st.caption("💡 **Tip:** Edit cells directly. To delete a row, check the box on the left and click the 'Trash' icon on the top right.")
         edited_ledger = st.data_editor(
             ledger_df, 
