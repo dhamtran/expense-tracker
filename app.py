@@ -1,9 +1,15 @@
 import json
+import time
+import io
 import pandas as pd
 import streamlit as st
+from PIL import Image
 from google import genai
 from google.genai import types
 from streamlit_gsheets import GSheetsConnection
+from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
+from googleapiclient.http import MediaIoBaseUpload
 
 # 1. UI Configuration
 st.set_page_config(page_title="MOWIN Expenses", page_icon="🟢", layout="wide")
@@ -26,9 +32,12 @@ st.markdown("""
 
 st.title("🟢 MOWIN Expenses")
 
-# Initialize File Uploader Session Key
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
+if "camera_key" not in st.session_state:
+    st.session_state.camera_key = 0
+if "camera_receipts" not in st.session_state:
+    st.session_state.camera_receipts = []
 
 # 2. Permanent Cloud Storage Connection
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -36,19 +45,58 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 @st.cache_data(ttl=5) 
 def load_ledger():
     try:
-        # Added ttl=5 here to force the Google Sheets connection to refresh
-        df = conn.read(worksheet=0, usecols=list(range(12)), ttl=5)
+        df = conn.read(worksheet=0, usecols=list(range(13)), ttl=5)
         return df.dropna(how="all")
     except Exception:
         return pd.DataFrame(columns=[
             "Date", "Merchant", "Original Currency", "Original Amount", 
             "Exchange Rate", "Amount (SGD)", "GST Amt (SGD)", "GST Rate", 
-            "Category", "Payment Method", "Purpose/Notes", "Status"
+            "Category", "Payment Method", "Purpose/Notes", "Status", "Receipt Link"
         ])
 
 ledger_df = load_ledger()
 
-# Helper Function: Duplicate Checking
+# Image Compression Engine
+def compress_file(file_obj):
+    file_bytes = file_obj.read()
+    mime_type = getattr(file_obj, "type", "image/jpeg")
+    filename = getattr(file_obj, "name", f"receipt_{int(time.time())}.jpg")
+    
+    if mime_type.startswith("image/"):
+        try:
+            img = Image.open(io.BytesIO(file_bytes))
+            img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=75, optimize=True)
+            return buffer.getvalue(), "image/jpeg", filename
+        except Exception:
+            pass
+    return file_bytes, mime_type, filename
+
+# Google Drive Upload Engine
+def upload_to_drive(file_bytes, filename, mime_type):
+    try:
+        folder_id = st.secrets["DRIVE_FOLDER_ID"]
+        creds_dict = {
+            "type": st.secrets["connections"]["gsheets"]["type"],
+            "project_id": st.secrets["connections"]["gsheets"]["project_id"],
+            "private_key": st.secrets["connections"]["gsheets"]["private_key"],
+            "client_email": st.secrets["connections"]["gsheets"]["client_email"],
+            "token_uri": st.secrets["connections"]["gsheets"]["token_uri"]
+        }
+        creds = Credentials.from_service_account_info(creds_dict, scopes=["https://www.googleapis.com/auth/drive"])
+        drive_service = build('drive', 'v3', credentials=creds)
+
+        file_metadata = {'name': filename, 'parents': [folder_id]}
+        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime_type, resumable=True)
+        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
+        return uploaded_file.get('webViewLink', '')
+    except Exception as e:
+        st.error(f"⚠️ Google Drive Upload Error: {e}")
+        return ""
+
 def is_duplicate_record(new_item, existing_df, current_batch):
     new_date = str(new_item.get("Date", "")).strip()
     new_merchant = str(new_item.get("Merchant", "")).strip().lower()
@@ -57,7 +105,6 @@ def is_duplicate_record(new_item, existing_df, current_batch):
     except (ValueError, TypeError):
         new_amount = 0.0
 
-    # 1. Check against existing Google Sheet records
     if not existing_df.empty:
         for _, row in existing_df.iterrows():
             row_date = str(row.get("Date", "")).strip()
@@ -70,7 +117,6 @@ def is_duplicate_record(new_item, existing_df, current_batch):
             if new_date == row_date and new_merchant == row_merchant and abs(new_amount - row_amount) < 0.01:
                 return True
 
-    # 2. Check against items already processed in current upload batch
     for item in current_batch:
         b_date = str(item.get("Date", "")).strip()
         b_merchant = str(item.get("Merchant", "")).strip().lower()
@@ -84,21 +130,39 @@ def is_duplicate_record(new_item, existing_df, current_batch):
 
     return False
 
-# 3. Intuitive Tabbed Interface
+# 3. Tabbed Interface
 tab1, tab2 = st.tabs(["📷 SmartScan", "📊 Cloud Ledger"])
 
 with tab1:
-    st.subheader("Upload Receipts")
-    uploaded_files = st.file_uploader(
-        "Drag & drop images or PDFs here", 
-        type=["pdf", "png", "jpg", "jpeg"], 
-        accept_multiple_files=True,
-        key=f"uploader_{st.session_state.uploader_key}"
-    )
+    st.subheader("Upload or Snap Receipts")
+    col_up, col_cam = st.columns(2)
+    
+    with col_up:
+        uploaded_files = st.file_uploader(
+            "Drag & drop files here", 
+            type=["pdf", "png", "jpg", "jpeg"], 
+            accept_multiple_files=True,
+            key=f"uploader_{st.session_state.uploader_key}"
+        )
+        
+    with col_cam:
+        captured_image = st.camera_input("Take a photo", key=f"cam_{st.session_state.camera_key}")
+        if captured_image is not None:
+            st.session_state.camera_receipts.append(captured_image)
+            st.session_state.camera_key += 1
+            st.rerun()
+
+    if st.session_state.camera_receipts:
+        st.info(f"📸 {len(st.session_state.camera_receipts)} photo(s) sitting in your camera queue.")
+        if st.button("Clear Camera Queue"):
+            st.session_state.camera_receipts = []
+            st.rerun()
+            
+    all_files = (uploaded_files or []) + st.session_state.camera_receipts
     
     if st.button("Process & Save to Cloud"):
-        if not uploaded_files:
-            st.warning("Please upload a receipt first.")
+        if not all_files:
+            st.warning("Please upload a receipt or take a photo first.")
         else:
             try:
                 api_key = st.secrets["GEMINI_API_KEY"]
@@ -107,8 +171,12 @@ with tab1:
                 new_rows = []
                 duplicates_found = 0
                 
-                for file in uploaded_files:
-                    with st.spinner(f"Scanning {file.name}..."):
+                for file_obj in all_files:
+                    comp_bytes, comp_mime, comp_name = compress_file(file_obj)
+                    
+                    with st.spinner(f"Uploading & Scanning {comp_name}..."):
+                        drive_link = upload_to_drive(comp_bytes, comp_name, comp_mime)
+                        
                         prompt = """
                         Parse this receipt into JSON strictly following Singapore IRAS guidelines:
                         Rules:
@@ -138,22 +206,38 @@ with tab1:
                             "required": ["Date", "Merchant", "Original Currency", "Original Amount", "Exchange Rate", "Amount (SGD)", "GST Amt (SGD)", "GST Rate", "Category", "Payment Method", "Purpose/Notes", "Status"]
                         }
                         
-                        response = client.models.generate_content(
-                            model="gemini-3.6-flash",
-                            contents=[types.Part.from_bytes(data=file.read(), mime_type=file.type), prompt],
-                            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=response_schema, temperature=0.1)
-                        )
-                        
-                        extracted_data = json.loads(response.text)
-                        
-                        # Run Duplicate Check
-                        if is_duplicate_record(extracted_data, ledger_df, new_rows):
-                            extracted_data["Status"] = "Potential Duplicate"
-                            duplicates_found += 1
-                        
-                        new_rows.append(extracted_data)
+                        # Enhanced Retry Engine (Catches 429 Rate Limits & 503 Overloads)
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                response = client.models.generate_content(
+                                    model="gemini-3.6-flash",
+                                    contents=[types.Part.from_bytes(data=comp_bytes, mime_type=comp_mime), prompt],
+                                    config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=response_schema, temperature=0.1)
+                                )
+                                extracted_data = json.loads(response.text)
+                                extracted_data["Receipt Link"] = drive_link
+                                
+                                if is_duplicate_record(extracted_data, ledger_df, new_rows):
+                                    extracted_data["Status"] = "Potential Duplicate"
+                                    duplicates_found += 1
+                                
+                                new_rows.append(extracted_data)
+                                break 
+                                
+                            except Exception as e:
+                                err_msg = str(e)
+                                if ("429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < max_retries - 1:
+                                    st.toast("⏳ Free quota rate limit reached. Pausing 17s before retrying...", icon="⏱️")
+                                    time.sleep(17) # Wait out the rate limit window
+                                elif "503" in err_msg and attempt < max_retries - 1:
+                                    time.sleep(3)
+                                else:
+                                    raise e
+
+                    # Small delay between files to avoid rapid burst calls
+                    time.sleep(2)
                 
-                # Append to Google Sheet permanently
                 if new_rows:
                     new_data_df = pd.DataFrame(new_rows)
                     updated_df = pd.concat([ledger_df, new_data_df], ignore_index=True)
@@ -162,10 +246,10 @@ with tab1:
                     if duplicates_found > 0:
                         st.toast(f"⚠️ Saved! {duplicates_found} potential duplicate(s) flagged.", icon="⚠️")
                     else:
-                        st.toast("✅ Successfully synced to your master Google Sheet!", icon="✅")
+                        st.toast("✅ Successfully synced to your Master Google Sheet & Drive!", icon="✅")
                     
-                    # Reset Uploader State and Refresh
                     st.session_state.uploader_key += 1
+                    st.session_state.camera_receipts = []
                     st.cache_data.clear()
                     st.rerun()
 
@@ -175,14 +259,12 @@ with tab1:
                 st.error(f"Error processing: {e}")
 
 with tab2:
-    # Refresh Button Row
     col_empty, col_btn = st.columns([4, 1])
     with col_btn:
         if st.button("🔄 Refresh Data", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
-    # Top Dashboard Metrics
     col1, col2, col3 = st.columns(3)
     total_sgd = ledger_df["Amount (SGD)"].sum() if not ledger_df.empty else 0.0
     gst_sgd = ledger_df["GST Amt (SGD)"].sum() if not ledger_df.empty else 0.0
@@ -196,4 +278,19 @@ with tab2:
     if ledger_df.empty:
         st.info("No records found in your Google Sheet yet.")
     else:
-        st.dataframe(ledger_df, use_container_width=True, hide_index=True)
+        st.caption("💡 **Tip:** Edit cells directly. To delete a row, check the box on the left and click the 'Trash' icon on the top right.")
+        edited_ledger = st.data_editor(
+            ledger_df, 
+            use_container_width=True, 
+            hide_index=True, 
+            num_rows="dynamic",
+            column_config={
+                "Receipt Link": st.column_config.LinkColumn("Receipt Link", display_text="View Receipt 🔗")
+            }
+        )
+        
+        if st.button("💾 Save Ledger Changes to Cloud"):
+            conn.update(worksheet=0, data=edited_ledger)
+            st.toast("✅ Master Google Sheet updated!", icon="✅")
+            st.cache_data.clear()
+            st.rerun()
