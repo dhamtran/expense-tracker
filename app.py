@@ -1,3 +1,5 @@
+import base64
+import requests
 import json
 import time
 import io
@@ -82,26 +84,27 @@ def compress_file(file_obj):
             pass
     return file_bytes, mime_type, filename
 
-# Google Drive Upload Engine
+# New Google Drive Upload Engine (Bypasses Quota via Apps Script)
 def upload_to_drive(file_bytes, filename, mime_type):
     try:
-        folder_id = st.secrets["DRIVE_FOLDER_ID"]
-        creds_dict = {
-            "type": st.secrets["connections"]["gsheets"]["type"],
-            "project_id": st.secrets["connections"]["gsheets"]["project_id"],
-            "private_key": st.secrets["connections"]["gsheets"]["private_key"],
-            "client_email": st.secrets["connections"]["gsheets"]["client_email"],
-            "token_uri": st.secrets["connections"]["gsheets"]["token_uri"]
+        script_url = st.secrets["APPS_SCRIPT_URL"]
+        payload = {
+            "base64": base64.b64encode(file_bytes).decode('utf-8'),
+            "filename": filename,
+            "mimeType": mime_type
         }
-        creds = Credentials.from_service_account_info(creds_dict, scopes=["https://www.googleapis.com/auth/drive"])
-        drive_service = build('drive', 'v3', credentials=creds)
-
-        file_metadata = {'name': filename, 'parents': [folder_id]}
-        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime_type, resumable=True)
-        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
-        return uploaded_file.get('webViewLink', '')
+        
+        response = requests.post(script_url, json=payload)
+        result = response.json()
+        
+        if result.get("status") == "success":
+            return result.get("link", "")
+        else:
+            st.error(f"⚠️ Apps Script Error: {result.get('message')}")
+            return ""
+            
     except Exception as e:
-        st.error(f"⚠️ Google Drive Upload Error: {e}")
+        st.error(f"⚠️ Drive Upload Error: {e}")
         return ""
 
 def is_duplicate_record(new_item, existing_df, current_batch):
