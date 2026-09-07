@@ -9,9 +9,6 @@ from PIL import Image
 from google import genai
 from google.genai import types
 from streamlit_gsheets import GSheetsConnection
-from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
-from googleapiclient.http import MediaIoBaseUpload
 
 # 1. UI Configuration
 st.set_page_config(page_title="MOWIN Expenses", page_icon="🟢", layout="wide")
@@ -196,25 +193,35 @@ with tab1:
                         4. Original Amount: Total numeric amount
                         5. Exchange Rate: Rate applied to convert to SGD (SGD = 1.0)
                         6. Amount (SGD): Original Amount * Exchange Rate
-                        7. GST Rate: Must be "9%", "0%", or "Exempt"
-                        8. GST Amt (SGD): If GST Rate is "9%", calculate (Amount SGD / 1.09) * 0.09. If 0% or Exempt, return 0.00
+                        7. GST RULE (CRITICAL COMPLIANCE): 
+                           - OVERSEAS: If the receipt is from outside Singapore, the GST Rate MUST strictly be "Exempt".
+                           - SINGAPORE: By IRAS law, a business can only charge GST if they print their "GST Registration Number" on the receipt. Scan the receipt for a GST No. If it is MISSING, you MUST set GST Rate to "Exempt" and GST Amt to 0.00, even if the merchant mistakenly printed a tax line. If a GST No. IS present, apply "9%" or "0%" as printed.
+                        8. GST Amt (SGD): If GST Rate is "9%", calculate (Amount SGD / 1.09) * 0.09. If 0% or Exempt, return 0.00.
                         9. Category: STRICTLY ONE of ['Travel & Transport', 'Accommodation', 'Meals & Entertainment', 'Office & Supplies', 'Communication', 'Professional Fees', 'Marketing & Business Dev', 'Utilities & Premises', 'Staff & Welfare', 'Bank & Finance', 'Other Business Costs', 'Personal / Non-Deductible']
                         10. Payment Method: Cash, Card, PayNow, Bank Transfer, etc.
                         11. Purpose/Notes: Brief business purpose
                         12. Status: "Unreviewed"
                         """
-                        response_schema = {
-                            "type": "OBJECT",
-                            "properties": {
-                                "Date": {"type": "STRING"}, "Merchant": {"type": "STRING"},
-                                "Original Currency": {"type": "STRING"}, "Original Amount": {"type": "NUMBER"},
-                                "Exchange Rate": {"type": "NUMBER"}, "Amount (SGD)": {"type": "NUMBER"},
-                                "GST Amt (SGD)": {"type": "NUMBER"}, "GST Rate": {"type": "STRING"},
-                                "Category": {"type": "STRING"}, "Payment Method": {"type": "STRING"},
-                                "Purpose/Notes": {"type": "STRING"}, "Status": {"type": "STRING"}
+                        
+                        # Official schema format to prevent 400 Errors
+                        official_schema = types.Schema(
+                            type=types.Type.OBJECT,
+                            properties={
+                                "Date": types.Schema(type=types.Type.STRING),
+                                "Merchant": types.Schema(type=types.Type.STRING),
+                                "Original Currency": types.Schema(type=types.Type.STRING),
+                                "Original Amount": types.Schema(type=types.Type.NUMBER),
+                                "Exchange Rate": types.Schema(type=types.Type.NUMBER),
+                                "Amount (SGD)": types.Schema(type=types.Type.NUMBER),
+                                "GST Amt (SGD)": types.Schema(type=types.Type.NUMBER),
+                                "GST Rate": types.Schema(type=types.Type.STRING),
+                                "Category": types.Schema(type=types.Type.STRING),
+                                "Payment Method": types.Schema(type=types.Type.STRING),
+                                "Purpose/Notes": types.Schema(type=types.Type.STRING),
+                                "Status": types.Schema(type=types.Type.STRING),
                             },
-                            "required": ["Date", "Merchant", "Original Currency", "Original Amount", "Exchange Rate", "Amount (SGD)", "GST Amt (SGD)", "GST Rate", "Category", "Payment Method", "Purpose/Notes", "Status"]
-                        }
+                            required=["Date", "Merchant", "Original Currency", "Original Amount", "Exchange Rate", "Amount (SGD)", "GST Amt (SGD)", "GST Rate", "Category", "Payment Method", "Purpose/Notes", "Status"]
+                        )
                         
                         # Enhanced Retry Engine (Catches 429 Rate Limits & 503 Overloads)
                         max_retries = 3
@@ -223,7 +230,11 @@ with tab1:
                                 response = client.models.generate_content(
                                     model="gemini-3.6-flash",
                                     contents=[types.Part.from_bytes(data=comp_bytes, mime_type=comp_mime), prompt],
-                                    config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=response_schema, temperature=0.1)
+                                    config=types.GenerateContentConfig(
+                                        response_mime_type="application/json", 
+                                        response_schema=official_schema, 
+                                        temperature=0.1
+                                    )
                                 )
                                 extracted_data = json.loads(response.text)
                                 extracted_data["Receipt Link"] = drive_link
@@ -271,7 +282,8 @@ with tab1:
 with tab2:
     col_empty, col_btn = st.columns([4, 1])
     with col_btn:
-        if st.button("🔄 Refresh Data", use_container_width=True):
+        # Layout Warning Fix: Replaced use_container_width with width="stretch"
+        if st.button("🔄 Refresh Data", width="stretch"):
             st.cache_data.clear()
             st.rerun()
 
@@ -292,9 +304,11 @@ with tab2:
         ledger_df["Receipt Link"] = ledger_df["Receipt Link"].fillna("").astype(str)
         
         st.caption("💡 **Tip:** Edit cells directly. To delete a row, check the box on the left and click the 'Trash' icon on the top right.")
+        
+        # Layout Warning Fix: Replaced use_container_width with width="stretch"
         edited_ledger = st.data_editor(
             ledger_df, 
-            use_container_width=True, 
+            width="stretch", 
             hide_index=True, 
             num_rows="dynamic",
             column_config={
