@@ -9,6 +9,7 @@ from PIL import Image
 from google import genai
 from google.genai import types
 from streamlit_gsheets import GSheetsConnection
+from pydantic import BaseModel
 
 # 1. UI Configuration
 st.set_page_config(page_title="MOWIN Expenses", page_icon="🟢", layout="wide")
@@ -46,12 +47,9 @@ def load_ledger():
     try:
         df = conn.read(worksheet=0, usecols=list(range(13)), ttl=5)
         df = df.dropna(how="all")
-        
-        # Ensure "Receipt Link" exists and is formatted as text
         if "Receipt Link" not in df.columns:
             df["Receipt Link"] = ""
         df["Receipt Link"] = df["Receipt Link"].fillna("").astype(str)
-        
         return df
     except Exception:
         return pd.DataFrame(columns=[
@@ -62,12 +60,10 @@ def load_ledger():
 
 ledger_df = load_ledger()
 
-# Image Compression Engine
 def compress_file(file_obj):
     file_bytes = file_obj.read()
     mime_type = getattr(file_obj, "type", "image/jpeg")
     filename = getattr(file_obj, "name", f"receipt_{int(time.time())}.jpg")
-    
     if mime_type.startswith("image/"):
         try:
             img = Image.open(io.BytesIO(file_bytes))
@@ -81,7 +77,6 @@ def compress_file(file_obj):
             pass
     return file_bytes, mime_type, filename
 
-# New Google Drive Upload Engine (Bypasses Quota via Apps Script)
 def upload_to_drive(file_bytes, filename, mime_type):
     try:
         script_url = st.secrets["APPS_SCRIPT_URL"]
@@ -90,16 +85,13 @@ def upload_to_drive(file_bytes, filename, mime_type):
             "filename": filename,
             "mimeType": mime_type
         }
-        
         response = requests.post(script_url, json=payload)
         result = response.json()
-        
         if result.get("status") == "success":
             return result.get("link", "")
         else:
             st.error(f"⚠️ Apps Script Error: {result.get('message')}")
             return ""
-            
     except Exception as e:
         st.error(f"⚠️ Drive Upload Error: {e}")
         return ""
@@ -136,6 +128,21 @@ def is_duplicate_record(new_item, existing_df, current_batch):
             return True
 
     return False
+
+# Foolproof Pydantic Schema
+class ReceiptSchema(BaseModel):
+    Date: str
+    Merchant: str
+    Original_Currency: str
+    Original_Amount: float
+    Exchange_Rate: float
+    Amount_SGD: float
+    GST_Amt_SGD: float
+    GST_Rate: str
+    Category: str
+    Payment_Method: str
+    Purpose_Notes: str
+    Status: str
 
 # 3. Tabbed Interface
 tab1, tab2 = st.tabs(["📷 SmartScan", "📊 Cloud Ledger"])
@@ -192,38 +199,17 @@ with tab1:
                         3. Original Currency: 3-letter code
                         4. Original Amount: Total numeric amount
                         5. Exchange Rate: Rate applied to convert to SGD (SGD = 1.0)
-                        6. Amount (SGD): Original Amount * Exchange Rate
+                        6. Amount_SGD: Original Amount * Exchange Rate
                         7. GST RULE (CRITICAL COMPLIANCE): 
-                           - OVERSEAS: If the receipt is from outside Singapore, the GST Rate MUST strictly be "Exempt".
-                           - SINGAPORE: By IRAS law, a business can only charge GST if they print their "GST Registration Number" on the receipt. Scan the receipt for a GST No. If it is MISSING, you MUST set GST Rate to "Exempt" and GST Amt to 0.00, even if the merchant mistakenly printed a tax line. If a GST No. IS present, apply "9%" or "0%" as printed.
-                        8. GST Amt (SGD): If GST Rate is "9%", calculate (Amount SGD / 1.09) * 0.09. If 0% or Exempt, return 0.00.
+                           - OVERSEAS: If the receipt is from outside Singapore, the GST_Rate MUST strictly be "Exempt".
+                           - SINGAPORE: By IRAS law, a business can only charge GST if they print their "GST Registration Number" on the receipt. Scan the receipt for a GST No. If it is MISSING, you MUST set GST_Rate to "Exempt" and GST_Amt_SGD to 0.00, even if the merchant mistakenly printed a tax line. If a GST No. IS present, apply "9%" or "0%" as printed.
+                        8. GST_Amt_SGD: If GST_Rate is "9%", calculate (Amount_SGD / 1.09) * 0.09. If 0% or Exempt, return 0.00.
                         9. Category: STRICTLY ONE of ['Travel & Transport', 'Accommodation', 'Meals & Entertainment', 'Office & Supplies', 'Communication', 'Professional Fees', 'Marketing & Business Dev', 'Utilities & Premises', 'Staff & Welfare', 'Bank & Finance', 'Other Business Costs', 'Personal / Non-Deductible']
-                        10. Payment Method: Cash, Card, PayNow, Bank Transfer, etc.
-                        11. Purpose/Notes: Brief business purpose
+                        10. Payment_Method: Cash, Card, PayNow, Bank Transfer, etc.
+                        11. Purpose_Notes: Brief business purpose
                         12. Status: "Unreviewed"
                         """
                         
-                        # Official schema format to prevent 400 Errors
-                        official_schema = types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "Date": types.Schema(type=types.Type.STRING),
-                                "Merchant": types.Schema(type=types.Type.STRING),
-                                "Original Currency": types.Schema(type=types.Type.STRING),
-                                "Original Amount": types.Schema(type=types.Type.NUMBER),
-                                "Exchange Rate": types.Schema(type=types.Type.NUMBER),
-                                "Amount (SGD)": types.Schema(type=types.Type.NUMBER),
-                                "GST Amt (SGD)": types.Schema(type=types.Type.NUMBER),
-                                "GST Rate": types.Schema(type=types.Type.STRING),
-                                "Category": types.Schema(type=types.Type.STRING),
-                                "Payment Method": types.Schema(type=types.Type.STRING),
-                                "Purpose/Notes": types.Schema(type=types.Type.STRING),
-                                "Status": types.Schema(type=types.Type.STRING),
-                            },
-                            required=["Date", "Merchant", "Original Currency", "Original Amount", "Exchange Rate", "Amount (SGD)", "GST Amt (SGD)", "GST Rate", "Category", "Payment Method", "Purpose/Notes", "Status"]
-                        )
-                        
-                        # Enhanced Retry Engine (Catches 429 Rate Limits & 503 Overloads)
                         max_retries = 3
                         for attempt in range(max_retries):
                             try:
@@ -232,12 +218,29 @@ with tab1:
                                     contents=[types.Part.from_bytes(data=comp_bytes, mime_type=comp_mime), prompt],
                                     config=types.GenerateContentConfig(
                                         response_mime_type="application/json", 
-                                        response_schema=official_schema, 
+                                        response_schema=ReceiptSchema, 
                                         temperature=0.1
                                     )
                                 )
-                                extracted_data = json.loads(response.text)
-                                extracted_data["Receipt Link"] = drive_link
+                                
+                                raw_pydantic_data = json.loads(response.text)
+                                
+                                # Remap Pydantic outputs exactly to your Master Google Sheet Column Headers
+                                extracted_data = {
+                                    "Date": raw_pydantic_data.get("Date", ""),
+                                    "Merchant": raw_pydantic_data.get("Merchant", ""),
+                                    "Original Currency": raw_pydantic_data.get("Original_Currency", ""),
+                                    "Original Amount": raw_pydantic_data.get("Original_Amount", 0.0),
+                                    "Exchange Rate": raw_pydantic_data.get("Exchange_Rate", 1.0),
+                                    "Amount (SGD)": raw_pydantic_data.get("Amount_SGD", 0.0),
+                                    "GST Amt (SGD)": raw_pydantic_data.get("GST_Amt_SGD", 0.0),
+                                    "GST Rate": raw_pydantic_data.get("GST_Rate", ""),
+                                    "Category": raw_pydantic_data.get("Category", ""),
+                                    "Payment Method": raw_pydantic_data.get("Payment_Method", ""),
+                                    "Purpose/Notes": raw_pydantic_data.get("Purpose_Notes", ""),
+                                    "Status": raw_pydantic_data.get("Status", "Unreviewed"),
+                                    "Receipt Link": drive_link
+                                }
                                 
                                 if is_duplicate_record(extracted_data, ledger_df, new_rows):
                                     extracted_data["Status"] = "Potential Duplicate"
@@ -249,14 +252,13 @@ with tab1:
                             except Exception as e:
                                 err_msg = str(e)
                                 if ("429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < max_retries - 1:
-                                    st.toast("⏳ Free quota rate limit reached. Pausing 17s before retrying...", icon="⏱️")
-                                    time.sleep(17) # Wait out the rate limit window
+                                    st.toast("⏳ Quota rate limit reached. Pausing 17s...", icon="⏱️")
+                                    time.sleep(17)
                                 elif "503" in err_msg and attempt < max_retries - 1:
                                     time.sleep(3)
                                 else:
                                     raise e
 
-                    # Small delay between files to avoid rapid burst calls
                     time.sleep(2)
                 
                 if new_rows:
@@ -275,14 +277,13 @@ with tab1:
                     st.rerun()
 
             except KeyError:
-                st.error("🚨 Missing Cloud Secret. Please configure your App Secrets in the Streamlit Dashboard.")
+                st.error("🚨 Missing Cloud Secret. Please configure your App Secrets.")
             except Exception as e:
                 st.error(f"Error processing: {e}")
 
 with tab2:
     col_empty, col_btn = st.columns([4, 1])
     with col_btn:
-        # Layout Warning Fix: Replaced use_container_width with width="stretch"
         if st.button("🔄 Refresh Data", width="stretch"):
             st.cache_data.clear()
             st.rerun()
@@ -300,12 +301,9 @@ with tab2:
     if ledger_df.empty:
         st.info("No records found in your Google Sheet yet.")
     else:
-        # Sanitize Receipt Link column to prevent Streamlit type-check errors
         ledger_df["Receipt Link"] = ledger_df["Receipt Link"].fillna("").astype(str)
-        
         st.caption("💡 **Tip:** Edit cells directly. To delete a row, check the box on the left and click the 'Trash' icon on the top right.")
         
-        # Layout Warning Fix: Replaced use_container_width with width="stretch"
         edited_ledger = st.data_editor(
             ledger_df, 
             width="stretch", 
