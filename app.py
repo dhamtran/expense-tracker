@@ -5,7 +5,7 @@ import time
 import io
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 from google import genai
 from google.genai import types
 from streamlit_gsheets import GSheetsConnection
@@ -60,23 +60,34 @@ def load_ledger():
 
 ledger_df = load_ledger()
 
+# FIX: Robust Image Compressor with Pointer Reset
 def compress_file(file_obj):
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+        
     file_bytes = file_obj.read()
     mime_type = getattr(file_obj, "type", "image/jpeg")
     filename = getattr(file_obj, "name", f"receipt_{int(time.time())}.jpg")
+    
+    if not file_bytes:
+        return b"", mime_type, filename
+
     if mime_type.startswith("image/"):
         try:
             img = Image.open(io.BytesIO(file_bytes))
+            img = ImageOps.exif_transpose(img) # Corrects mobile phone rotation
             img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-            if img.mode in ("RGBA", "P"):
+            if img.mode != "RGB":
                 img = img.convert("RGB")
             buffer = io.BytesIO()
             img.save(buffer, format="JPEG", quality=75, optimize=True)
             return buffer.getvalue(), "image/jpeg", filename
         except Exception:
             pass
+            
     return file_bytes, mime_type, filename
 
+# Google Drive Upload Engine (Bypasses Quota via Apps Script)
 def upload_to_drive(file_bytes, filename, mime_type):
     try:
         script_url = st.secrets["APPS_SCRIPT_URL"]
@@ -187,6 +198,11 @@ with tab1:
                 
                 for file_obj in all_files:
                     comp_bytes, comp_mime, comp_name = compress_file(file_obj)
+                    
+                    # FIX: Explicit check to prevent 0-byte API crash
+                    if not comp_bytes:
+                        st.error(f"⚠️ Could not read image data for {comp_name}. Please re-upload or retake the photo.")
+                        continue
                     
                     with st.spinner(f"Uploading & Scanning {comp_name}..."):
                         drive_link = upload_to_drive(comp_bytes, comp_name, comp_mime)
